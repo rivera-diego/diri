@@ -58,4 +58,4 @@ $ diri daemon
 
 ---
 
-_Inspired by [Nirius](https://github.com/tsdh/nirius) and [Piri](https://github.com/vaxerski/Piri)._
+_Inspired by [Nirius](https://git.sr.ht/~tsdh/nirius) and [Piri](https://github.com/Asthestarsfalll/piri)._
