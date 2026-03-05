@@ -125,26 +125,41 @@ async fn run_daemon() -> Result<()> {
     let (event_tx, mut event_rx) = mpsc::channel::<Event>(32);
 
     std::thread::spawn(move || {
-        let mut socket = match niri_ipc::socket::Socket::connect() {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("Error conectando a niri socket: {}", e);
-                return;
-            }
-        };
+        loop {
+            let mut socket = match niri_ipc::socket::Socket::connect() {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Error conectando a niri socket: {}", e);
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    continue;
+                }
+            };
 
-        if socket.send(Request::EventStream).is_ok() {
-            let mut read_event = socket.read_events();
-            loop {
-                match read_event() {
-                    Ok(event) => {
-                        if event_tx.blocking_send(event).is_err() {
-                            break;
+            if socket.send(Request::EventStream).is_ok() {
+                let mut read_event = socket.read_events();
+                loop {
+                    match read_event() {
+                        Ok(event) => {
+                            if event_tx.blocking_send(event).is_err() {
+                                return; // Channel closed, main loop ended
+                            }
+                        }
+                        Err(e) => {
+                            let err_msg = e.to_string();
+                            if err_msg.contains("unknown variant") {
+                                // Evento nuevo de Niri WIP que no conocemos.
+                                // Rompemos este loop para reconectar y limpiar el buffer del socket.
+                                break;
+                            } else {
+                                eprintln!("Error leyendo evento de Niri: {}", e);
+                                break;
+                            }
                         }
                     }
-                    Err(_) => break,
                 }
             }
+            // Pequeña espera antes de intentar reconectar
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
     });
 
@@ -165,21 +180,24 @@ async fn run_daemon() -> Result<()> {
         tokio::select! {
             // A. Escucha EVENTOS DE NIRI (Aquí irá la lógica del autofill en el futuro)
             event = event_rx.recv() => {
-                if let Some(event) = event {
-                    match event {
-                        Event::WindowClosed { .. } | Event::WindowLayoutsChanged { .. } => {
-                            // Ejecuta el autofill SOLO si pasaron 150ms desde el último salto.
-                            // Esto es idéntico al mecanismo "Throttle" de Piri para evitar bucles
-                            // infinitos y congelamientos cuando se dispara una ráfaga de eventos.
-                            if autofill_throttle.check_and_update(std::time::Duration::from_millis(150)) {
-                                let _ = tokio::task::spawn_blocking(|| {
-                                    if let Err(e) = auto_fill() {
-                                        eprintln!("Error en autofill: {}", e);
-                                    }
-                                }).await;
+                match event {
+                    Some(event) => {
+                        match event {
+                            Event::WindowClosed { .. } | Event::WindowLayoutsChanged { .. } => {
+                                if autofill_throttle.check_and_update(std::time::Duration::from_millis(150)) {
+                                    let _ = tokio::task::spawn_blocking(|| {
+                                        if let Err(e) = auto_fill() {
+                                            eprintln!("Error en autofill: {}", e);
+                                        }
+                                    }).await;
+                                }
                             }
+                            _ => {}
                         }
-                        _ => {}
+                    }
+                    None => {
+                        eprintln!("La conexión de eventos con Niri se ha cerrado. ¿Ha crasheado Niri o ha cambiado el protocolo?");
+                        break Ok(());
                     }
                 }
             }
